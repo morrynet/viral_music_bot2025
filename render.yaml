@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: viral-music-bot
+    runtime: python:3.12.7
+    buildCommand: pip install python-telegram-bot==20.7 flask requests python-dotenv
+    startCommand: python bot.py
+    envVars:
+      - key: PORT
+        value: 10000

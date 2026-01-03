@@ -1,0 +1,15 @@
+
+---
+
+## 📁 File 5: `database.db`
+
+> Leave this as an **empty file**. The bot will auto-create all tables on startup.
+
+---
+
+## ✅ Next Steps
+
+This **Super Bot** is now:
+- Fully merged (music + payments + groups + admin)
+- Ready for sandbox testing
+- Extensible (add expiry, web dashboard, etc.)

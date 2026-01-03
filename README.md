@@ -1,14 +1,16 @@
-# 🎶 Viral Music + MPESA Super Bot
+# Viral Music + MPESA Bot
 
-## ✅ Features
-- **Quiz Unlock**: Pass a quiz to get 20 free promotion shares
-- **MPESA Payments**: Buy 20/50/100 shares via STK Push
-- **Auto-Broadcast**: Promote links across registered groups
-- **Admin Dashboard**: `/stats`, `/listgroups`, revenue tracking
-- **Fraud-Safe**: Validated callbacks, no duplicate unlocks
-- **SQLite**: Fully persistent data
+## Features
+- Quiz unlock (20 free shares)
+- MPESA packages: 20 / 50 / 100 shares
+- Promote links to registered groups
+- Admin dashboard (`/stats`, `/listgroups`)
+- Auto MPESA verification
 
-## 🚀 Setup
-1. Install dependencies:
-   ```bash
-   pip install python-telegram-bot flask python-dotenv requests
+## Setup
+1. `pip install python-telegram-bot flask python-dotenv requests`
+2. Fill `.env`
+3. Run: `python bot.py`
+4. Expose `/mpesa_callback` publicly (use Render, Railway, or Ngrok)
+
+Database: `database.db` auto-created.

@@ -3,8 +3,8 @@ import os
 import sqlite3
 import threading
 import time
-from flask import Flask, request
-from dotenv import load_dotenv
+from datetime import datetime
+from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,57 +12,57 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+from telegram.constants import ParseMode
 from mpesa import initiate_stk_push
 
-load_dotenv()
-
+# ----------------- CONFIG -----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing in .env")
+    raise ValueError("❌ BOT_TOKEN is required in .env")
 
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 DB = "database.db"
+PORT = int(os.getenv("PORT", 10000))
+MPESA_CALLBACK_URL = os.getenv("MPESA_CALLBACK_URL")
+RENDER_APP_URL = os.getenv("RENDER_APP_URL", "")
 
-# ================= DATABASE =================
+# ----------------- DATABASE -----------------
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            unlocked INTEGER DEFAULT 0,
-            shares INTEGER DEFAULT 0,
-            quizzes_passed INTEGER DEFAULT 0,
-            promotions_used INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS approved_groups (
-            chat_id INTEGER PRIMARY KEY,
-            title TEXT,
-            username TEXT,
-            added_by INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT,
-            amount INTEGER,
-            package TEXT,
-            user_id INTEGER,
-            status TEXT DEFAULT 'pending',
-            timestamp INTEGER
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS packages (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            price INTEGER,
-            shares INTEGER
-        )
-    """)
+    # Users
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        unlocked INTEGER DEFAULT 0,
+        shares INTEGER DEFAULT 0,
+        quizzes_passed INTEGER DEFAULT 0,
+        promotions_used INTEGER DEFAULT 0
+    )""")
+    # Approved groups
+    c.execute("""CREATE TABLE IF NOT EXISTS approved_groups (
+        chat_id INTEGER PRIMARY KEY,
+        title TEXT,
+        username TEXT,
+        added_by INTEGER
+    )""")
+    # Payments
+    c.execute("""CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT,
+        amount INTEGER,
+        package TEXT,
+        user_id INTEGER,
+        status TEXT DEFAULT 'pending',
+        timestamp INTEGER
+    )""")
+    # Packages
+    c.execute("""CREATE TABLE IF NOT EXISTS packages (
+        id INTEGER PRIMARY KEY,
+        name TEXT,
+        price INTEGER,
+        shares INTEGER
+    )""")
+    # Insert default packages if empty
     c.execute("SELECT COUNT(*) FROM packages")
     if c.fetchone()[0] == 0:
         c.executemany("INSERT INTO packages VALUES (?, ?, ?, ?)", [
@@ -73,6 +73,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# ----------------- HELPERS -----------------
 def get_user(user_id):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -125,12 +126,15 @@ def get_approved_groups():
     conn.close()
     return rows
 
-# ================= FLASK APP =================
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+# ----------------- FLASK APP -----------------
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
 def home():
-    return "✅ Viral Music Bot Running!"
+    return "✅ Viral Music + MPESA Bot Running!"
 
 @flask_app.route("/mpesa_callback", methods=["POST"])
 def mpesa_callback():
@@ -138,18 +142,19 @@ def mpesa_callback():
         data = request.json
         callback = data.get("Body", {}).get("stkCallback", {})
         if callback.get("ResultCode") != 0:
-            return {"status": "failed"}, 200
+            return jsonify({"status": "failed"}), 200
 
         meta = callback["CallbackMetadata"]["Item"]
         amount = next(item["Value"] for item in meta if item["Name"] == "Amount")
         phone = next(item["Value"] for item in meta if item["Name"] == "PhoneNumber")
-        account_ref = callback.get("MerchantRequestID")
-        user_id = int(account_ref)
+        account_ref = callback.get("MerchantRequestID")  # user_id
 
+        user_id = int(account_ref)
         package_map = {20: "BASIC", 50: "PRO", 100: "VIP"}
         package_name = package_map.get(amount, "Custom")
-        shares = amount if amount in package_map else 20
+        shares = package_map.get(amount, 20)
 
+        # Record payment
         conn = sqlite3.connect(DB)
         c = conn.cursor()
         c.execute("""
@@ -160,25 +165,33 @@ def mpesa_callback():
         conn.commit()
         conn.close()
 
+        # Notify user
         from telegram import Bot
         bot = Bot(token=BOT_TOKEN)
-        bot.send_message(user_id, f"✅ Payment of KES {amount} confirmed! You now have {shares} promotion shares.")
-        return {"status": "verified"}, 200
+        bot.send_message(user_id, f"✅ Payment of KES {amount} confirmed!\nYou now have {shares} promotion shares.")
+        if ADMIN_IDS:
+            for aid in ADMIN_IDS:
+                try:
+                    bot.send_message(aid, f"💰 New payment!\nUser: {user_id}\nAmount: KES {amount}\nPackage: {package_name}")
+                except:
+                    pass
+        return jsonify({"status": "verified"}), 200
     except Exception as e:
-        print("Callback error:", e)
-        return {"error": str(e)}, 500
+        print("MPESA Callback Error:", e)
+        return jsonify({"error": str(e)}), 500
 
-# ================= TELEGRAM HANDLERS =================
+# ----------------- TELEGRAM HANDLERS -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(update.effective_user.id)
     kb = [[InlineKeyboardButton("🎧 Take Quiz", callback_data="quiz")]]
-    await update.message.reply_text(
+    msg = (
         "🎶 *Welcome to Viral Music Bot!*\n\n"
         "🔹 Pass the quiz to get *20 free shares*\n"
         "🔹 Or buy more via MPESA\n\n"
-        "Use /promote <link> after unlocking.",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
+        f"Your shares: *{user[2]}*\n"
+        "Use /promote <link> to share after unlocking."
     )
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -187,10 +200,7 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Mama & Teachers", callback_data="correct")],
         [InlineKeyboardButton("Dance Party", callback_data="wrong")]
     ]
-    await q.message.reply_text(
-        "What is the song about?",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
+    await q.message.reply_text("What is the song about?", reply_markup=InlineKeyboardMarkup(kb))
 
 async def quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -208,14 +218,17 @@ async def promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = context.args[0]
     user = get_user(update.effective_user.id)
     if user[2] <= 0:
-        await update.message.reply_text("🔒 No shares left. Use /buy to get more.")
+        await update.message.reply_text("🔒 You have no shares left. Buy more with /buy")
         return
     if use_share(update.effective_user.id):
         groups = get_approved_groups()
         sent = 0
         for chat_id, title, _ in groups:
             try:
-                await context.bot.send_message(chat_id, f"🔥 Viral Link!\n{link}")
+                await context.bot.send_message(
+                    chat_id,
+                    f"🔥 Viral Link!\n{link}\nShared by @{update.effective_user.username or 'user'}"
+                )
                 sent += 1
             except:
                 pass
@@ -233,7 +246,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for name, price, shares in packages:
         msg += f"→ {name}: KES {price} → {shares} shares\n"
     msg += "\nUsageId: `/pay <phone> <amount>`\nExample: `/pay 254712345678 50`"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 2:
@@ -241,7 +254,7 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     phone = context.args[0]
     if not phone.startswith("254") or len(phone) != 12:
-        await update.message.reply_text("📱 Use format: 2547XXXXXXXX")
+        await update.message.reply_text("📱 Please use format: 2547XXXXXXXX")
         return
     try:
         amount = int(context.args[1])
@@ -266,6 +279,8 @@ async def register_group_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ Group registered for auto-broadcast!")
 
 async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
     groups = get_approved_groups()
     if not groups:
         await update.message.reply_text("No registered groups.")
@@ -273,11 +288,10 @@ async def listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📋 *Registered Groups:*\n"
     for chat_id, title, username in groups:
         msg += f"- {title} (@{username or 'private'})\n"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+    if not is_admin(update.effective_user.id):
         return
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -290,14 +304,14 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     msg = (
         f"📊 *Admin Stats*\n"
-        f"Users: {users}\n"
+        f"Total Users: {users}\n"
         f"Total Promotions Used: {promos}\n"
         f"Verified Payments: {payments or 0}\n"
-        f"Revenue: KES {revenue or 0}"
+        f"Total Revenue: KES {revenue or 0}"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-# ================= MAIN =================
+# ----------------- MAIN -----------------
 def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -313,6 +327,10 @@ def run_bot():
 
 if __name__ == "__main__":
     init_db()
-    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000))), daemon=True).start()
-    print("🚀 Viral Music Super Bot is running...")
+    # Start Flask server in background
+    threading.Thread(
+        target=lambda: flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False),
+        daemon=True
+    ).start()
+    print("🚀 Viral Music + MPESA Super Bot is running...")
     run_bot()
